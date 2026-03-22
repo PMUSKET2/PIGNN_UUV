@@ -246,13 +246,7 @@ class PIGNN(nn.Module):
         """Convert a single flattened input vector z to a HeteroData graph."""
         state = z[:9]          # [x,y,z,cosψ,sinψ,u,v,w,r]
         tau   = z[9:13]        # [X,Y,Z,Mz]
-        graph = build_graph(state.detach(), tau.detach())
-        # Move all tensors to same device
-        for store in graph.node_stores:
-            store.x = store.x.to(z.device)
-        for store in graph.edge_stores:
-            store.edge_index = store.edge_index.to(z.device)
-            store.edge_attr  = store.edge_attr.to(z.device)
+        graph = build_graph(state.detach(), tau.detach(), device=z.device)
         return graph
 
     # ----- forward --------------------------------------------------------

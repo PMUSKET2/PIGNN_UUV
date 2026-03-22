@@ -115,6 +115,7 @@ _BUOY_EDGE_STATIC     = _static_buoyancy_edge_features()
 def build_graph(
     hull_state: torch.Tensor,
     tau: torch.Tensor,
+    device: torch.device = None,
 ) -> HeteroData:
     """
     Build a single heterogeneous graph for one time-step.
@@ -123,29 +124,27 @@ def build_graph(
     ----------
     hull_state : (9,)  — [x, y, z, cos(ψ), sin(ψ), u, v, w, r]
     tau        : (4,)  — [X, Y, Z, M_z]
+    device     : target device (inferred from hull_state if None)
 
     Returns
     -------
     HeteroData with node / edge features as specified in the technical
     feedback document.
     """
+    if device is None:
+        device = hull_state.device
+
     data = HeteroData()
 
     # --- Node features ---------------------------------------------------
-    # Hull (1 node, dim 8): [x, y, z, ψ_proxy, u, v, w, r]
-    # We keep cos/sin separate in the state but for the hull node features
-    # we concatenate the full 9-dim state minus one (combine cos/sin → 2 cols
-    # already present).  To match the spec (dim 8) we drop one of cos/sin
-    # and keep heading as (cos, sin) but that gives dim 9.  We'll use the
-    # full 9 and let the encoder handle it — this is more informative.
-    data["hull"].x = hull_state.unsqueeze(0)                  # (1, 9)
+    data["hull"].x = hull_state.unsqueeze(0).to(device)       # (1, 9)
 
     # Thrusters (8 nodes, dim 8 each)
     f_individual = allocate_thrusts(tau.unsqueeze(0)).squeeze(0)  # (8,)
     thruster_feats = []
     for i in range(NUM_THRUSTERS):
-        pos  = torch.tensor(THRUSTER_CONFIG[i]["position"],    dtype=torch.float32)
-        odir = torch.tensor(THRUSTER_CONFIG[i]["orientation"],  dtype=torch.float32)
+        pos  = torch.tensor(THRUSTER_CONFIG[i]["position"],    dtype=torch.float32, device=device)
+        odir = torch.tensor(THRUSTER_CONFIG[i]["orientation"],  dtype=torch.float32, device=device)
         cmd  = f_individual[i].unsqueeze(0)                     # thrust command
         act  = cmd                                              # steady-state model
         feat = torch.cat([cmd, act, pos, odir])                 # (8,)
@@ -155,43 +154,42 @@ def build_graph(
     # Hydrodynamic (1 node, dim 4)
     data["hydrodynamic"].x = torch.tensor(
         [[X_u + X_uc, Y_v + Y_vc, Z_w + Z_wc, N_r + N_rc]],
-        dtype=torch.float32,
+        dtype=torch.float32, device=device,
     )                                                         # (1, 4)
 
     # Buoyancy (1 node, dim 6)
     data["buoyancy"].x = torch.tensor(
         [[F_bouy, 0.0, 0.0, 0.0, 0.0, -0.1]],
-        dtype=torch.float32,
+        dtype=torch.float32, device=device,
     )                                                         # (1, 6)
 
     # --- Edge indices & features -----------------------------------------
-    # Thruster → Hull  (8 edges: each thruster → the single hull node)
-    src = torch.arange(NUM_THRUSTERS, dtype=torch.long)
-    dst = torch.zeros(NUM_THRUSTERS, dtype=torch.long)
+    src = torch.arange(NUM_THRUSTERS, dtype=torch.long, device=device)
+    dst = torch.zeros(NUM_THRUSTERS, dtype=torch.long, device=device)
     data["thruster", "forces", "hull"].edge_index = torch.stack([src, dst])
 
     # Dynamic part: actual thrust vector + lever arm + efficiency
     thrust_vecs = []
     for i in range(NUM_THRUSTERS):
-        odir = torch.tensor(THRUSTER_CONFIG[i]["orientation"], dtype=torch.float32)
-        pos  = torch.tensor(THRUSTER_CONFIG[i]["position"],    dtype=torch.float32)
+        odir = torch.tensor(THRUSTER_CONFIG[i]["orientation"], dtype=torch.float32, device=device)
+        pos  = torch.tensor(THRUSTER_CONFIG[i]["position"],    dtype=torch.float32, device=device)
         fi   = f_individual[i]
         tv   = fi * odir                                      # thrust vector (3,)
-        eff  = torch.tensor([1.0])
+        eff  = torch.tensor([1.0], device=device)
         thrust_vecs.append(torch.cat([tv, pos, eff]))          # (7,)
     data["thruster", "forces", "hull"].edge_attr = torch.stack(thrust_vecs)
 
     # Hydrodynamic → Hull  (1 edge)
     data["hydrodynamic", "drag", "hull"].edge_index = torch.tensor(
-        [[0], [0]], dtype=torch.long
+        [[0], [0]], dtype=torch.long, device=device,
     )
-    data["hydrodynamic", "drag", "hull"].edge_attr = _HYDRO_EDGE_STATIC.clone()
+    data["hydrodynamic", "drag", "hull"].edge_attr = _HYDRO_EDGE_STATIC.clone().to(device)
 
     # Buoyancy → Hull  (1 edge)
     data["buoyancy", "restoring", "hull"].edge_index = torch.tensor(
-        [[0], [0]], dtype=torch.long
+        [[0], [0]], dtype=torch.long, device=device,
     )
-    data["buoyancy", "restoring", "hull"].edge_attr = _BUOY_EDGE_STATIC.clone()
+    data["buoyancy", "restoring", "hull"].edge_attr = _BUOY_EDGE_STATIC.clone().to(device)
 
     return data
 
